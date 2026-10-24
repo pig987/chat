@@ -93,10 +93,7 @@ int main(int argc, char *argv[]){
                 memcpy(msg, &readlen, 4);
                 memcpy(msg + 4, stdin_buf, readlen);
 
-                send(sockfd, msg, 6, 0);
-                sleep(1);
-                //int bytes = send(sockfd, msg, 4 + readlen, 0); 원래 줄
-                int bytes = send(sockfd, msg+6, 4 + readlen-6, 0);
+                int bytes = send(sockfd, msg, 4 + readlen, 0);
                 if (bytes == -1){
                     perror("send");
                 }
@@ -116,6 +113,7 @@ int main(int argc, char *argv[]){
                 sock_buf[numbytes] = '\0';
                 printf("\r\033[2K");
                 printf("%s", sock_buf);
+                if(sock_buf[numbytes - 1] != '\n') printf("\n");
             }
         }
     }

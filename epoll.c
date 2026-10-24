@@ -77,7 +77,7 @@ int main(void){
     socklen_t addr_size;
 
     int numbytes;
-    int body_len = 0;
+    uint32_t body_len = 0;
     int remaining = 0;
     int received;
     char msg[MAX_BODY_LEN + 1];
@@ -136,7 +136,6 @@ int main(void){
             else{
                 if (remaining == 0){ // 길이 받기
                     numbytes = recv(current, &body_len, 4, 0);
-                    //서버에 있는 배열 크기를 넘지않는걸 확인한다
                     if (numbytes == -1){
                         if (errno == EINTR) continue; // 시그널 끼어들어서 -1인 경우
                         perror("recv");
@@ -173,6 +172,20 @@ int main(void){
                             }
                         }
                         printf("User %d AFK\n", current);
+                    }
+                    // 서버에 있는 배열 크기를 넘으면 연결끊기
+                    else if (body_len == 0 || body_len > MAX_BODY_LEN){
+                        printf("'Buffer Overflow' occurred by User %d\n", current);
+                        epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
+                        close(current);
+                        // 클라 배열에서 지우기
+                        for (int j = 0; j < client_count; j++){
+                            if (client_fds[j] == current){
+                                client_fds[j] = client_fds[client_count - 1];
+                                client_count--;
+                                break;
+                            }
+                        }
                     }
                     else{
                         remaining = body_len;
