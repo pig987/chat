@@ -172,7 +172,7 @@ int main(void){
                 else{ // numbytes > 0 일 때
                     buf[numbytes] = '\0';
                     char msg[150];
-                    int len = snprintf(msg, sizeof msg, "User %d: %s", current, buf);
+                    int len = snprintf(msg, sizeof msg, "User %d: %s", current, buf + 4);
                     for (int j = 0; j < client_count; j++){
                         if(client_fds[j] == current) continue;
                         if (send(client_fds[j], msg, len, MSG_NOSIGNAL) == -1){

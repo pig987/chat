@@ -77,13 +77,24 @@ int main(int argc, char *argv[]){
         for(int i = 0; i < n; i++){
             if(events[i].data.fd == 0){ // 키보드 엔터
                 int readlen = read(0, stdin_buf, sizeof(stdin_buf)); // 터미널 버퍼에서 가져오기
+                if (readlen == 0){ // 0 (Ctrl+D 입력끝)
+                    return EXIT_SUCCESS; // 정상종료로 침
+                }
+                if (readlen == -1){
+                    perror("read");
+                    continue;
+                }
                 if (readlen == 1 && stdin_buf[0] == '\n') continue;
 
-                int bytes = send(sockfd, stdin_buf, readlen, 0);
+                char msg[4 + readlen];
+                memcpy(msg, &readlen, 4);
+                memcpy(msg + 4, stdin_buf, readlen);
+
+                int bytes = send(sockfd, msg, 4 + readlen, 0);
                 if (bytes == -1){
                     perror("send");
                 }
-                printf("-- %d bytes were sented --\n", bytes);
+                printf("\033[90m-- %d bytes were sent --\033[0m\n", bytes);
             }
             else {
                 numbytes = recv(sockfd, sock_buf, MAXDATASIZE - 1, 0);
@@ -97,7 +108,7 @@ int main(int argc, char *argv[]){
                     exit(EXIT_FAILURE);
                 }
                 sock_buf[numbytes] = '\0';
-                printf("%s\n", sock_buf);
+                printf("%s", sock_buf);
             }
         }
     }
