@@ -1,0 +1,2 @@
+#define MAX_BODY_LEN 200
+#define PREFIX_MAX 50

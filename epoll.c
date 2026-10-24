@@ -9,9 +9,9 @@
 #include <netdb.h>
 #include <poll.h>
 #include <errno.h>
+#include "protocol.h"
 
 #define PORT "9034"   // Port we're listening on
-#define MAXDATASIZE 100
 #define MAX_EVENTS 64
 #define MAX_CLIENTS 5
 
@@ -77,8 +77,11 @@ int main(void){
     socklen_t addr_size;
 
     int numbytes;
-    char buf[MAXDATASIZE];
-    
+    int body_len = 0;
+    int remaining = 0;
+    int received;
+    char msg[MAX_BODY_LEN + 1];
+
     int client_fds[MAX_CLIENTS] = {0};
     int client_count = 0;
     
@@ -130,53 +133,69 @@ int main(void){
                 client_fds[client_count] = new_fd;
                 client_count++;
             }
-            else{ // 리스너 아닌 나머지
-                numbytes = recv(current, buf, MAXDATASIZE - 1, 0);
-                if (numbytes == -1){
-                    if (errno == EINTR) continue; // 시그널 끼어들어서 -1인 경우
-                    perror("recv");
-                    // 비정상 종료. set에서 지우기
-                    epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
-                    close(current);
-                    // 클라 배열에서 지우기
-                    for (int j = 0; j < client_count; j++){
-                        if (client_fds[j] == current){
-                            client_fds[j] = client_fds[client_count - 1];
-                            client_count--;
-                            break;
+            else{
+                if (remaining == 0){ // 길이 받기
+                    numbytes = recv(current, &body_len, 4, 0);
+                    //서버에 있는 배열 크기를 넘지않는걸 확인한다
+                    if (numbytes == -1){
+                        if (errno == EINTR) continue; // 시그널 끼어들어서 -1인 경우
+                        perror("recv");
+                        // 비정상 종료. set에서 지우기
+                        epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
+                        close(current);
+                        // 클라 배열에서 지우기
+                        for (int j = 0; j < client_count; j++){
+                            if (client_fds[j] == current){
+                                client_fds[j] = client_fds[client_count - 1];
+                                client_count--;
+                                break;
+                            }
                         }
+                    }
+                    else if (numbytes == 0){
+                        // 감시대상에서 먼저 빼고 fd닫기
+                        epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
+                        close(current); 
+                        // 클라 배열에서 지우기
+                        for (int j = 0; j < client_count; j++){
+                            if (client_fds[j] == current){
+                                client_fds[j] = client_fds[client_count - 1];
+                                client_count--;
+                                break;
+                            }
+                        }
+                        // 나갔다고 broadcast
+                        char msg[100];
+                        int len = snprintf(msg, sizeof msg, "User %d AFK\n", current);
+                        for (int j = 0; j < client_count; j++){
+                            if (send(client_fds[j], msg, len, MSG_NOSIGNAL) == -1){
+                                perror("send");
+                            }
+                        }
+                        printf("User %d AFK\n", current);
+                    }
+                    else{
+                        remaining = body_len;
+                        received = 0;
                     }
                 }
-                else if (numbytes == 0){
-                    // 감시대상에서 먼저 빼고 fd닫기
-                    epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
-                    close(current); 
-                    // 클라 배열에서 지우기
-                    for (int j = 0; j < client_count; j++){
-                        if (client_fds[j] == current){
-                            client_fds[j] = client_fds[client_count - 1];
-                            client_count--;
-                            break;
-                        }
-                    }
-                    // 나갔다고 broadcast
-                    char msg[100];
-                    int len = snprintf(msg, sizeof msg, "User %d AFK\n", current);
-                    for (int j = 0; j < client_count; j++){
-                        if (send(client_fds[j], msg, len, MSG_NOSIGNAL) == -1){
-                            perror("send");
-                        }
-                    }
-                    printf("User %d AFK\n", current);
-                }
-                else{ // numbytes > 0 일 때
-                    buf[numbytes] = '\0';
-                    char msg[150];
-                    int len = snprintf(msg, sizeof msg, "User %d: %s", current, buf + 4);
-                    for (int j = 0; j < client_count; j++){
-                        if(client_fds[j] == current) continue;
-                        if (send(client_fds[j], msg, len, MSG_NOSIGNAL) == -1){
-                            perror("send");
+                else{
+                    numbytes = recv(current, msg + received, remaining, 0);
+                    if (numbytes == -1){} // todo
+                    else if (numbytes == 0){} // todo
+                    else{
+                        remaining -= numbytes;
+                        received += numbytes;
+                        if (remaining == 0){ // 다 받은 상태
+                            msg[body_len] = '\0';
+                            char temp[MAX_BODY_LEN + PREFIX_MAX];
+                            int len = snprintf(temp, sizeof temp, "User %d: %s", current, msg);
+                            for (int j = 0; j < client_count; j++){
+                                if(client_fds[j] == current) continue;
+                                if (send(client_fds[j], temp, len, MSG_NOSIGNAL) == -1){
+                                    perror("send");
+                                }
+                            }
                         }
                     }
                 }

@@ -5,6 +5,7 @@
 #include <sys/epoll.h>
 #include <errno.h>
 #include <unistd.h>
+#include "protocol.h"
 
 #define PORT "9034"
 #define MAX_EVENTS 10
@@ -48,8 +49,8 @@ int main(int argc, char *argv[]){
 
     int epollfd, n;
     struct epoll_event ev, events[MAX_EVENTS];
-    char sock_buf[MAXDATASIZE];
-    char stdin_buf[MAXDATASIZE];
+    char sock_buf[MAX_BODY_LEN + PREFIX_MAX + 1];
+    char stdin_buf[MAX_BODY_LEN];
     int numbytes;
 
     epollfd = epoll_create1(0);
@@ -67,6 +68,8 @@ int main(int argc, char *argv[]){
     epoll_ctl(epollfd, EPOLL_CTL_ADD, sockfd, &ev);
 
     while(1){
+        printf("You: ");
+        fflush(stdout);
         n = epoll_wait(epollfd, events, MAX_EVENTS, -1);
         if (n == -1){
             if (errno == EINTR) continue;
@@ -84,20 +87,23 @@ int main(int argc, char *argv[]){
                     perror("read");
                     continue;
                 }
-                if (readlen == 1 && stdin_buf[0] == '\n') continue;
+                if (readlen == 1 && stdin_buf[0] == '\n') continue; // You: 이거 추가하고 어떻게된거지 지금
 
                 char msg[4 + readlen];
                 memcpy(msg, &readlen, 4);
                 memcpy(msg + 4, stdin_buf, readlen);
 
-                int bytes = send(sockfd, msg, 4 + readlen, 0);
+                send(sockfd, msg, 6, 0);
+                sleep(1);
+                //int bytes = send(sockfd, msg, 4 + readlen, 0); 원래 줄
+                int bytes = send(sockfd, msg+6, 4 + readlen-6, 0);
                 if (bytes == -1){
                     perror("send");
                 }
                 printf("\033[90m-- %d bytes were sent --\033[0m\n", bytes);
             }
             else {
-                numbytes = recv(sockfd, sock_buf, MAXDATASIZE - 1, 0);
+                numbytes = recv(sockfd, sock_buf, MAX_BODY_LEN + PREFIX_MAX, 0);
                 if (numbytes == -1){
                     if (errno == EINTR) continue;
                     perror("recv");
@@ -108,6 +114,7 @@ int main(int argc, char *argv[]){
                     exit(EXIT_FAILURE);
                 }
                 sock_buf[numbytes] = '\0';
+                printf("\r\033[2K");
                 printf("%s", sock_buf);
             }
         }
