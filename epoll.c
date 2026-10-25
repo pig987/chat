@@ -9,11 +9,15 @@
 #include <netdb.h>
 #include <poll.h>
 #include <errno.h>
+#include <signal.h>
 #include "protocol.h"
 
 #define PORT "9034"   // Port we're listening on
 #define MAX_EVENTS 64
 #define MAX_CLIENTS 5
+
+FILE *logfp;
+volatile int running = 1;
 
 int get_listener_socket(void){
     int rv;
@@ -27,7 +31,9 @@ int get_listener_socket(void){
     hints.ai_flags = AI_PASSIVE;
 
     if ((rv = getaddrinfo(NULL, PORT, &hints, &servInfo)) != 0){
-        fprintf(stderr, "%s", gai_strerror(rv));
+        fprintf(stderr, "%s\n", gai_strerror(rv));
+        fprintf(logfp, "%s\n", gai_strerror(rv));
+        fflush(logfp);
         exit(1);
     }
 
@@ -52,6 +58,8 @@ int get_listener_socket(void){
 
     if (p == NULL){
         fprintf(stderr, "bind 실패\n");
+        fprintf(logfp, "bind 실패\n");
+        fflush(logfp);
         return -1;
     }
 
@@ -63,10 +71,41 @@ int get_listener_socket(void){
     return listener;
 }
 
+int sendall(int fd, char *buf, int len){
+    int total = 0;
+    int bytesleft = len;
+    int n;
+
+    while(total < len){ // 다 보낼때까지
+        n = send(fd, buf + total, bytesleft, MSG_NOSIGNAL);
+        if (n == -1) break;
+        total += n;
+        bytesleft -= n;
+    }
+
+    return n == -1? -1 : 0;
+}
+
+void on_sig_int(int sig){
+    running = 0;
+}
+
 int main(void){
+    logfp = fopen("server.log", "a");
+    if (logfp == NULL){
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+    fprintf(logfp, "서버 시작\n");
+    fflush(logfp);
+    signal(SIGINT, on_sig_int);
+    signal(SIGHUP, on_sig_int);
+
     int listner = get_listener_socket();
     if (listner == -1){
         fprintf(stderr, "listener 생성 실패\n");
+        fprintf(logfp, "listener 생성 실패\n");
+        fflush(logfp);
         exit(1);
     }
 
@@ -77,12 +116,17 @@ int main(void){
     socklen_t addr_size;
 
     int numbytes;
-    uint32_t body_len = 0;
-    int remaining = 0;
-    int received;
-    char msg[MAX_BODY_LEN + 1];
 
-    int client_fds[MAX_CLIENTS] = {0};
+    struct client{
+        int fd;
+        uint32_t body_len;
+        int remaining;
+        int received;
+        char msg[MAX_BODY_LEN + 1];
+    };
+
+    //int client_fds[MAX_CLIENTS] = {0};
+    struct client clients[MAX_CLIENTS];
     int client_count = 0;
     
     epollfd = epoll_create1(0);
@@ -95,7 +139,7 @@ int main(void){
     ev.data.fd = listner;
     epoll_ctl(epollfd, EPOLL_CTL_ADD, listner, &ev);
 
-    for(;;){
+    while(running){
         n = epoll_wait(epollfd, events, MAX_EVENTS, -1);
         if (n == -1){
             if (errno == EINTR) continue;
@@ -120,22 +164,30 @@ int main(void){
                 char msg[100];
                 int len = snprintf(msg, sizeof msg, "User %d entered the chat\n", new_fd);
                 for(int j = 0; j < client_count; j++){
-                    if (send(client_fds[j], msg, len, MSG_NOSIGNAL) == -1){
-                        perror("send");
+                    if (sendall(clients[j].fd, msg, len) == -1){
+                        perror("sendall");
                     }
                 }
                 printf("User %d Entered the chat\n", new_fd);
+                fprintf(logfp, "User %d Entered the chat\n", new_fd);
+                fflush(logfp);
                 // set추가
                 ev.events = EPOLLIN;
                 ev.data.fd = new_fd;
                 epoll_ctl(epollfd, EPOLL_CTL_ADD, new_fd, &ev);
                 // 클라 배열에 추가
-                client_fds[client_count] = new_fd;
+                clients[client_count] = (struct client){ .fd = new_fd };
                 client_count++;
             }
             else{
-                if (remaining == 0){ // 길이 받기
-                    numbytes = recv(current, &body_len, 4, 0);
+                int idx;
+                for (int j = 0; j < client_count; j++){
+                    if (clients[j].fd == current) { idx = j; break; }
+                }
+                struct client *c = &clients[idx];
+
+                if (c->remaining == 0){ // 길이 받기
+                    numbytes = recv(current, &(c->body_len), 4, 0);
                     if (numbytes == -1){
                         if (errno == EINTR) continue; // 시그널 끼어들어서 -1인 경우
                         perror("recv");
@@ -143,70 +195,82 @@ int main(void){
                         epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
                         close(current);
                         // 클라 배열에서 지우기
-                        for (int j = 0; j < client_count; j++){
-                            if (client_fds[j] == current){
-                                client_fds[j] = client_fds[client_count - 1];
-                                client_count--;
-                                break;
-                            }
-                        }
+                        clients[idx] = clients[client_count - 1];
+                        client_count--;
                     }
                     else if (numbytes == 0){
                         // 감시대상에서 먼저 빼고 fd닫기
                         epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
                         close(current); 
                         // 클라 배열에서 지우기
-                        for (int j = 0; j < client_count; j++){
-                            if (client_fds[j] == current){
-                                client_fds[j] = client_fds[client_count - 1];
-                                client_count--;
-                                break;
-                            }
-                        }
+                        clients[idx] = clients[client_count - 1];
+                        client_count--;
                         // 나갔다고 broadcast
                         char msg[100];
                         int len = snprintf(msg, sizeof msg, "User %d AFK\n", current);
                         for (int j = 0; j < client_count; j++){
-                            if (send(client_fds[j], msg, len, MSG_NOSIGNAL) == -1){
-                                perror("send");
+                            if (sendall(clients[j].fd, msg, len) == -1){
+                                perror("sendall");
                             }
                         }
                         printf("User %d AFK\n", current);
+                        fprintf(logfp, "User %d AFK\n", current);
+                        fflush(logfp);
                     }
                     // 서버에 있는 배열 크기를 넘으면 연결끊기
-                    else if (body_len == 0 || body_len > MAX_BODY_LEN){
+                    else if (c->body_len == 0 || c->body_len > MAX_BODY_LEN){
                         printf("'Buffer Overflow' occurred by User %d\n", current);
+                        fprintf(logfp, "'Buffer Overflow' occurred by User %d\n", current);
+                        fflush(logfp);
                         epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
                         close(current);
                         // 클라 배열에서 지우기
-                        for (int j = 0; j < client_count; j++){
-                            if (client_fds[j] == current){
-                                client_fds[j] = client_fds[client_count - 1];
-                                client_count--;
-                                break;
-                            }
-                        }
+                        clients[idx] = clients[client_count - 1];
+                        client_count--;
                     }
                     else{
-                        remaining = body_len;
-                        received = 0;
+                        c->remaining = c->body_len;
+                        c->received = 0;
                     }
                 }
                 else{
-                    numbytes = recv(current, msg + received, remaining, 0);
-                    if (numbytes == -1){} // todo
-                    else if (numbytes == 0){} // todo
+                    numbytes = recv(current, c->msg + c->received, c->remaining, 0);
+                    if (numbytes == -1){
+                        if (errno == EINTR) continue;
+                        perror("recv");
+                        epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
+                        close(current);
+                        clients[idx] = clients[client_count - 1];
+                        client_count--;
+                    }
+                    else if (numbytes == 0){
+                        epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
+                        close(current); 
+                        clients[idx] = clients[client_count - 1];
+                        client_count--;
+                        // 나갔다고 broadcast
+                        char msg[100];
+                        int len = snprintf(msg, sizeof msg, "User %d AFK\n", current);
+                        for (int j = 0; j < client_count; j++){
+                            if (sendall(clients[j].fd, msg, len) == -1){
+                                perror("sendall");
+                            }
+                        }
+                        printf("User %d AFK\n", current);
+                        fprintf(logfp, "User %d AFK\n", current);
+                        fflush(logfp);
+                    }
                     else{
-                        remaining -= numbytes;
-                        received += numbytes;
-                        if (remaining == 0){ // 다 받은 상태
-                            msg[body_len] = '\0';
+                        c->remaining -= numbytes;
+                        c->received += numbytes;
+                        if (c->remaining == 0){ // 다 받은 상태
+                            c->msg[c->body_len] = '\0';
                             char temp[MAX_BODY_LEN + PREFIX_MAX];
-                            int len = snprintf(temp, sizeof temp, "User %d: %s", current, msg);
+                            int len = snprintf(temp, sizeof temp, "User %d: %s", current, c->msg);
                             for (int j = 0; j < client_count; j++){
-                                if(client_fds[j] == current) continue;
-                                if (send(client_fds[j], temp, len, MSG_NOSIGNAL) == -1){
-                                    perror("send");
+                                if(clients[j].fd == current) continue;
+                                if (sendall(clients[j].fd, temp, len) == -1){
+                                    perror("sendall");
                                 }
                             }
                         }
@@ -215,4 +279,6 @@ int main(void){
             }
         }
     }
+    fprintf(logfp, "서버 정상 종료\n\n");
+    fflush(logfp);
 }
