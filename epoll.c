@@ -120,6 +120,7 @@ int main(void){
     struct client{
         int fd;
         uint32_t body_len;
+        int header_received;
         int remaining;
         int received;
         char msg[MAX_BODY_LEN + 1];
@@ -186,8 +187,9 @@ int main(void){
                 }
                 struct client *c = &clients[idx];
 
-                if (c->remaining == 0){ // 길이 받기
-                    numbytes = recv(current, &(c->body_len), 4, 0);
+                if (c->header_received != 4){ // 길이 받기
+                    // 주소에 1바이트 단위로 더해야해서 (char *)로 포인터 타입 변환
+                    numbytes = recv(current, (char *)&(c->body_len) + c->header_received, 4 - (c->header_received), 0);
                     if (numbytes == -1){
                         if (errno == EINTR) continue; // 시그널 끼어들어서 -1인 경우
                         perror("recv");
@@ -217,18 +219,23 @@ int main(void){
                         fprintf(logfp, "User %d AFK\n", current);
                         fflush(logfp);
                     }
-                    // 서버에 있는 배열 크기를 넘으면 연결끊기
-                    else if (c->body_len == 0 || c->body_len > MAX_BODY_LEN){
-                        printf("'Buffer Overflow' occurred by User %d\n", current);
-                        fprintf(logfp, "'Buffer Overflow' occurred by User %d\n", current);
-                        fflush(logfp);
-                        epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
-                        close(current);
-                        // 클라 배열에서 지우기
-                        clients[idx] = clients[client_count - 1];
-                        client_count--;
-                    }
                     else{
+                        c->header_received += numbytes;
+                        if (c->header_received < 4) continue;
+
+                        // 서버에 있는 배열 크기를 넘으면 연결끊기
+                        if (c->body_len == 0 || c->body_len > MAX_BODY_LEN){
+                            printf("'Buffer Overflow' occurred by User %d\n", current);
+                            fprintf(logfp, "'Buffer Overflow' occurred by User %d\n", current);
+                            fflush(logfp);
+                            epoll_ctl(epollfd, EPOLL_CTL_DEL, current, NULL);
+                            close(current);
+                            // 클라 배열에서 지우기
+                            clients[idx] = clients[client_count - 1];
+                            client_count--;
+                            continue;
+                        }
+
                         c->remaining = c->body_len;
                         c->received = 0;
                     }
@@ -264,6 +271,7 @@ int main(void){
                         c->remaining -= numbytes;
                         c->received += numbytes;
                         if (c->remaining == 0){ // 다 받은 상태
+                            c->header_received = 0;
                             c->msg[c->body_len] = '\0';
                             char temp[MAX_BODY_LEN + PREFIX_MAX];
                             int len = snprintf(temp, sizeof temp, "User %d: %s", current, c->msg);
